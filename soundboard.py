@@ -1,4 +1,3 @@
-import gradio as gr
 import random
 import json
 import asyncio
@@ -6,9 +5,11 @@ import os
 import io
 import tempfile
 import time
+import zipfile                               # ---------- Batch-TTS additions ----------
 import numpy as np
 from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI
+import gradio as gr
 
 load_dotenv()
 
@@ -454,6 +455,17 @@ with gr.Blocks(
             play_btn = gr.Button(value="Play", variant="primary", icon=os.path.join("assets", "ic_fluent_play_24_filled.svg"), visible=True)
             stop_btn = gr.Button(value="Stop", variant="stop", icon=os.path.join("assets", "ic_fluent_stop_24_filled.svg"), visible=False)
 
+            # ---------- Batch-TTS additions (UI) ----------
+            gr.Markdown("---")
+            with gr.Accordion("Batch TTS from TXT", open=False):  # 折叠以简化布局
+                # gr.Markdown("### Batch TTS from TXT")
+                with gr.Row():
+                    txt_file = gr.File(label="Upload .txt", file_types=["text"])
+                    batch_btn = gr.Button("Batch Generate TTS", variant="primary")
+                progress_bar = gr.HTML()     # 新增 progress 组件
+                download_zip = gr.File(label="Download ZIP", visible=False)
+            # ---------- End Batch-TTS additions (UI) ----------
+
         # connect vibe buttons
         for vibe_button in vibe_buttons:
             vibe_button.click(
@@ -556,6 +568,57 @@ with gr.Blocks(
         handle_stop,
         outputs=[play_btn, stop_btn, audio_output]
     )
+
+    # ---------- Batch-TTS additions (logic) ----------
+    async def batch_generate_tts(txt_file_obj, voice_name_md, vibe_instruction, progress=gr.Progress()):
+        """
+        1. 读取上传的 txt，按行（非空行）拆分。
+        2. 使用当前 voice 与 vibe 指令批量异步合成 MP3。
+        3. 实时更新进度条，最后打包 ZIP 返回。
+        """
+        if txt_file_obj is None:
+            raise gr.Error("Please upload a .txt file first.")
+
+        voice_name = voice_name_md.replace("# Voice: ", "").strip().lower()
+        if not voice_name:
+            raise gr.Error("Please select a voice before generating.")
+
+        with open(txt_file_obj.name, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f.readlines() if l.strip()]
+
+        if not lines:
+            raise gr.Error("TXT file is empty.")
+
+        total = len(lines)
+        zip_path = os.path.join(temp_dir, f"{voice_name}_{int(time.time())}.zip")
+
+        # 让按钮显示处理状态
+        yield gr.update(visible=False), gr.update(value="Processing...", interactive=False), gr.update(value="")
+
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for idx, line in enumerate(lines, start=1):
+                progress(idx / total, desc=f"Generating {idx}/{total}")
+                mp3_path = os.path.join(temp_dir, f"{voice_name}_{idx}.mp3")
+                await generate_audio_file(line, mp3_path, voice_name, vibe_instruction)
+                zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
+                # 更新进度条 HTML
+                progress_html = f"<progress value='{idx}' max='{total}' style='width:100%'></progress>"
+                yield gr.update(visible=False), gr.update(), gr.update(value=progress_html)
+
+        gr.Info(f"Generated {total} audio files.")
+
+        # 恢复按钮并输出 ZIP
+        final_html = f"<progress value='{total}' max='{total}' style='width:100%'></progress>"
+        yield gr.update(value=zip_path, visible=True), gr.update(value="Batch Generate TTS", interactive=True), gr.update(value=final_html)
+
+    # 三步输出： [download_zip, batch_btn, progress_bar]
+    batch_btn.click(
+        batch_generate_tts,
+        inputs=[txt_file, voice_label, vibe_desc],
+        outputs=[download_zip, batch_btn, progress_bar],
+        show_progress="none"   # 使用自定义 progress 对象，禁用默认 spinner
+    )
+    # ---------- End Batch-TTS additions (logic) ----------
 
 if __name__ == "__main__":
     asyncio.run(
