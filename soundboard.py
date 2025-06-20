@@ -15,8 +15,43 @@ load_dotenv()
 
 # Global state
 is_playing = False
-LANGUAGES = ["English", "Chinese", "Spanish", "French", "German", "Japanese",
-             "Korean", "Italian", "Portuguese", "Russian"]
+LANGUAGES = [
+    "English",
+    "Arabic",
+    "Bulgarian",
+    "Chinese, Traditional",
+    "Czech",
+    "Danish",
+    "Dutch",
+    "Finnish",
+    "French",
+    "German",
+    "Greek",
+    "Hebrew",
+    "Hungarian",
+    "Italian",
+    "Japanese",
+    "Korean",
+    "Malay",
+    "Norwegian Bokmål",
+    "Polish",
+    "Portuguese",
+    "Portuguese (Brazil)",
+    "Romanian",
+    "Russian",
+    "Slovak",
+    "Spanish",
+    "Spanish (Latin America)",
+    "Swedish",
+    "Thai",
+    "Turkish",
+    "Ukrainian",
+    "Vietnamese",
+    "Indonesian",
+    "Latvijas",
+    "Kazakh",
+]
+ 
 
 # Create a temporary directory to store audio files
 temp_dir = tempfile.mkdtemp()
@@ -77,13 +112,6 @@ def load_vibes():
     return [vibe["Vibe"] for vibe in vibes]
 
 
-def update_vibe_buttons(all_vibes=None):
-    if all_vibes is None:
-        all_vibes = load_vibes()
-    visible_vibes = random.sample(all_vibes, 5)
-    return [gr.Button(vibe, variant="secondary", visible=(vibe in visible_vibes)) for vibe in all_vibes], visible_vibes
-
-
 def get_vibe_description(vibe_name):
     with open("vibe.json", "r", encoding="utf-8") as file:
         vibes = json.load(file)
@@ -95,22 +123,6 @@ def get_vibe_description(vibe_name):
     return ""
 
 
-def update_selected_vibe(selected_vibe, visible_vibes):
-    all_vibes = load_vibes()
-    description = get_vibe_description(selected_vibe)
-    return [gr.Button(vibe,
-                      variant="primary" if vibe == selected_vibe else "secondary",
-                      visible=(vibe in visible_vibes))
-            for vibe in all_vibes], visible_vibes
-
-
-def shuffle_vibes():
-    all_vibes = load_vibes()
-    visible_vibes = random.sample(all_vibes, 5)
-    buttons = [gr.Button(vibe, variant="secondary", visible=(vibe in visible_vibes)) for vibe in all_vibes]
-    return *buttons, visible_vibes
-
-
 def get_vibe_info(vibe_name):
     with open("vibe.json", "r", encoding="utf-8") as file:
         vibes = json.load(file)
@@ -119,7 +131,6 @@ def get_vibe_info(vibe_name):
                 # Replace escaped newlines with actual newlines while preserving other characters
                 description = vibe["Description"].replace('\\n', '\n')
                 script = vibe["Script"].replace('\\n', '\n')
-                script = ""
                 return description, script
     return "", ""
 
@@ -410,17 +421,14 @@ with gr.Blocks(
     with gr.Row():
         with gr.Column():
             gr.Markdown("# Vibe")
-            with gr.Row(elem_classes="vibe-buttons"):
-                all_vibes = load_vibes()
-                vibe_buttons, visible_vibes = update_vibe_buttons(all_vibes)
-                visible_vibes_state = gr.State(value=visible_vibes)
-                shuffle_btn = gr.Button("Shuffle", variant="huggingface", visible=True)
+            all_vibes = load_vibes()
+            vibe_dropdown = gr.Dropdown(choices=all_vibes, value=all_vibes[0], label="Select a Vibe")
+            shuffle_btn = gr.Button("Shuffle", variant="huggingface", visible=True)
             vibe_desc = gr.Textbox(show_label=False, container=False, lines=15, max_lines=15)
 
         with gr.Column():
             gr.Markdown("# Script")
 
-            # Shared textbox for both original and translated content
             translation_toggle = gr.Radio(
                 choices=["Original", "Translation"],
                 value="Original",
@@ -428,7 +436,6 @@ with gr.Blocks(
             )
             vibe_script = gr.Textbox(show_label=False, container=False, lines=9, max_lines=9)
 
-            # States to keep original / translated strings
             with gr.Row():
                 translate_btn = gr.Button("Translate to", variant="secondary")
                 language_dd = gr.Dropdown(
@@ -458,7 +465,6 @@ with gr.Blocks(
             # ---------- Batch-TTS additions (UI) ----------
             gr.Markdown("---")
             with gr.Accordion("Batch TTS from TXT", open=False):  # 折叠以简化布局
-                # gr.Markdown("### Batch TTS from TXT")
                 with gr.Row():
                     txt_file = gr.File(label="Upload .txt", file_types=["text"])
                     batch_btn = gr.Button("Batch Generate TTS", variant="primary")
@@ -466,23 +472,28 @@ with gr.Blocks(
                 download_zip = gr.File(label="Download ZIP", visible=False)
             # ---------- End Batch-TTS additions (UI) ----------
 
-        # connect vibe buttons
-        for vibe_button in vibe_buttons:
-            vibe_button.click(
-                lambda vibe, current_vibes: (
-                    get_vibe_info(vibe)[0],  # description
-                    *update_selected_vibe(vibe, current_vibes)[0],  # update button styles
-                    current_vibes,  # keep visible list
-                    gr.update(),  # do NOT change Script
-                    gr.update(),  # keep original_state unchanged
-                    gr.update()   # keep translated_state unchanged
-                ),
-                inputs=[vibe_button, visible_vibes_state],
-                outputs=[vibe_desc, *vibe_buttons, visible_vibes_state, vibe_script, original_state, translated_state]
-            )
+    # 新增：dropdown 选择 vibe 时，更新描述、脚本、状态
+    def on_vibe_change(vibe):
+        desc, script = get_vibe_info(vibe)
+        return desc, script, vibe, script, ""  # desc, script, original_state, script(原文), 清空翻译
 
-        shuffle_btn.click(shuffle_vibes,
-                          outputs=[*vibe_buttons, visible_vibes_state])
+    vibe_dropdown.change(
+        on_vibe_change,
+        inputs=[vibe_dropdown],
+        outputs=[vibe_desc, vibe_script, original_state, vibe_script, translated_state]
+    )
+
+    # Shuffle 逻辑：随机选一个vibe
+    def shuffle_vibe_dropdown(vibe_list):
+        vibe = random.choice(vibe_list)
+        desc, script = get_vibe_info(vibe)
+        return vibe, desc, script, vibe, script, ""  # dropdown值, desc, script, original_state, script, 清空翻译
+
+    shuffle_btn.click(
+        shuffle_vibe_dropdown,
+        inputs=[gr.State(all_vibes)],
+        outputs=[vibe_dropdown, vibe_desc, vibe_script, original_state, vibe_script, translated_state]
+    )
 
     # ---------- Translation button逻辑 ---------- #
     def run_translation(orig_text, tgt_lang):
