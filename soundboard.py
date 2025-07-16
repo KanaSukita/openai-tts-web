@@ -470,6 +470,9 @@ with gr.Blocks(
                     batch_btn = gr.Button("Batch Generate TTS", variant="primary")
                 progress_bar = gr.HTML()     # 新增 progress 组件
                 download_zip = gr.File(label="Download ZIP", visible=False)
+                multi_lang_btn = gr.Button("Generate All Languages Audio (Original)", variant="primary")
+                multi_lang_progress = gr.HTML()
+                multi_lang_zip = gr.File(label="All Languages ZIP", visible=False)
             # ---------- End Batch-TTS additions (UI) ----------
 
     # 新增：dropdown 选择 vibe 时，更新描述、脚本、状态
@@ -622,6 +625,56 @@ with gr.Blocks(
         final_html = f"<progress value='{total}' max='{total}' style='width:100%'></progress>"
         yield gr.update(value=zip_path, visible=True), gr.update(value="Batch Generate TTS", interactive=True), gr.update(value=final_html)
 
+    async def generate_all_languages_audio(original_text, voice_name_md, vibe_instruction, progress=gr.Progress()):
+        """
+        1. 把 original_text 依次翻译成所有 LANGUAGES。
+        2. 每个翻译用同一 voice/vibe 合成 mp3。
+        3. 全部 mp3 打包 zip 返回。
+        """
+        if not original_text or not original_text.strip():
+            raise gr.Error("No text to synthesize.")
+
+        voice_name = voice_name_md.replace("# Voice: ", "").strip().lower()
+        if not voice_name:
+            raise gr.Error("Please select a voice.")
+
+        total = len(LANGUAGES)
+        zip_path = os.path.join(temp_dir, f"{voice_name}_alllangs_{int(time.time())}.zip")
+        # 让按钮显示处理中
+        yield gr.update(visible=False), gr.update(value="Processing...", interactive=False), gr.update(value="")
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for idx, lang in enumerate(LANGUAGES, start=1):
+                progress(idx / total, desc=f"{lang}: translating")
+                # 翻译文本
+                try:
+                    if lang == "English":
+                        translated = original_text
+                    else:
+                        translated = await translate_text(original_text, lang)
+                except Exception as e:
+                    translated = f"[Translation Error: {str(e)}]"
+                # 生成音频
+                mp3_path = os.path.join(temp_dir, f"{voice_name}_{lang.replace(' ', '_')}.mp3")
+                try:
+                    await generate_audio_file(translated, mp3_path, voice_name, vibe_instruction)
+                    zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
+                except Exception as e:
+                    # 出错时生成一个提示音频或文本（可选，这里直接跳过）
+                    pass
+                progress_html = (
+                    f"<progress value='{idx}' max='{total}' style='width:100%'></progress> "
+                    f"<div>正在处理: {lang}</div>"
+                )
+                yield gr.update(visible=False), gr.update(), gr.update(value=progress_html)
+
+        gr.Info(f"已生成 {total} 个音频，打包完成。")
+        final_html = (
+            f"<progress value='{total}' max='{total}' style='width:100%'></progress> "
+            f"<div>所有语言批量生成完成！</div>"
+        )
+        yield gr.update(value=zip_path, visible=True), gr.update(value="Generate All Languages Audio (Original)", interactive=True), gr.update(value=final_html)
+
+
     # 三步输出： [download_zip, batch_btn, progress_bar]
     batch_btn.click(
         batch_generate_tts,
@@ -629,13 +682,21 @@ with gr.Blocks(
         outputs=[download_zip, batch_btn, progress_bar],
         show_progress="none"   # 使用自定义 progress 对象，禁用默认 spinner
     )
+    multi_lang_btn.click(
+        generate_all_languages_audio,
+        inputs=[original_state, voice_label, vibe_desc],
+        outputs=[multi_lang_zip, multi_lang_btn, multi_lang_progress],
+        show_progress="none"
+    )
     # ---------- End Batch-TTS additions (logic) ----------
 
 if __name__ == "__main__":
     asyncio.run(
         demo.launch(
             favicon_path="assets/system_head.png",
-            share=True,
-            auth=("admin", "tplinkcnai")
+            auth=("admin", "tplinkcnai"),
+            server_name="0.0.0.0",
+            server_port=7861,
+            root_path="/tts-web"
         )
     )
