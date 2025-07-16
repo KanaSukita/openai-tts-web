@@ -51,7 +51,7 @@ LANGUAGES = [
     "Latvijas",
     "Kazakh",
 ]
- 
+BATCH_PARALLELISM = 8  # 控制批量生成的并发数
 
 # Create a temporary directory to store audio files
 temp_dir = tempfile.mkdtemp()
@@ -464,15 +464,15 @@ with gr.Blocks(
 
             # ---------- Batch-TTS additions (UI) ----------
             gr.Markdown("---")
-            with gr.Accordion("Batch TTS from TXT", open=False):  # 折叠以简化布局
-                with gr.Row():
-                    txt_file = gr.File(label="Upload .txt", file_types=["text"])
-                    batch_btn = gr.Button("Batch Generate TTS", variant="primary")
-                progress_bar = gr.HTML()     # 新增 progress 组件
-                download_zip = gr.File(label="Download ZIP", visible=False)
+            with gr.Accordion("Batch TTS", open=False):  # 折叠以简化布局
                 multi_lang_btn = gr.Button("Generate All Languages Audio (Original)", variant="primary")
                 multi_lang_progress = gr.HTML()
                 multi_lang_zip = gr.File(label="All Languages ZIP", visible=False)
+                with gr.Row():
+                    txt_file = gr.File(label="Upload .txt", file_types=["text"])
+                    batch_btn = gr.Button("Batch Generate TTS from txt", variant="primary")
+                progress_bar = gr.HTML()     # 新增 progress 组件
+                download_zip = gr.File(label="Download ZIP", visible=False)
             # ---------- End Batch-TTS additions (UI) ----------
 
     # 新增：dropdown 选择 vibe 时，更新描述、脚本、状态
@@ -592,36 +592,50 @@ with gr.Blocks(
         """
         if txt_file_obj is None:
             raise gr.Error("Please upload a .txt file first.")
-
         voice_name = voice_name_md.replace("# Voice: ", "").strip().lower()
         if not voice_name:
             raise gr.Error("Please select a voice before generating.")
 
         with open(txt_file_obj.name, "r", encoding="utf-8") as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
-
         if not lines:
             raise gr.Error("TXT file is empty.")
 
         total = len(lines)
         zip_path = os.path.join(temp_dir, f"{voice_name}_{int(time.time())}.zip")
-
-        # 让按钮显示处理状态
         yield gr.update(visible=False), gr.update(value="Processing...", interactive=False), gr.update(value="")
 
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for idx, line in enumerate(lines, start=1):
-                progress(idx / total, desc=f"Generating {idx}/{total}")
-                mp3_path = os.path.join(temp_dir, f"{voice_name}_{idx}.mp3")
-                await generate_audio_file(line, mp3_path, voice_name, vibe_instruction)
-                zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
-                # 更新进度条 HTML
-                progress_html = f"<progress value='{idx}' max='{total}' style='width:100%'></progress>"
+        semaphore = asyncio.Semaphore(BATCH_PARALLELISM)  # 控制最大并发量，比如 5
+
+        # 存每条任务的mp3路径
+        mp3_paths = [os.path.join(temp_dir, f"{voice_name}_{idx+1}.mp3") for idx in range(total)]
+
+        async def synth_one(idx, line):
+            # 用信号量保证并发控制
+            async with semaphore:
+                await generate_audio_file(line, mp3_paths[idx], voice_name, vibe_instruction)
+            return idx
+
+        # 启动所有语音合成任务
+        tasks = [asyncio.create_task(synth_one(idx, line)) for idx, line in enumerate(lines)]
+
+        finished = 0
+        for coro in asyncio.as_completed(tasks):
+            try:
+                idx = await coro  # 获取已完成的 idx
+                finished += 1
+                progress(finished / total, desc=f"Generating {finished}/{total}")
+                progress_html = f"<progress value='{finished}' max='{total}' style='width:100%'></progress>"
                 yield gr.update(visible=False), gr.update(), gr.update(value=progress_html)
+            except Exception as e:
+                # 这里你可以加异常处理逻辑，或者把失败任务补录下来
+                pass
 
+        # 打包 ZIP
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for mp3_path in mp3_paths:
+                zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
         gr.Info(f"Generated {total} audio files.")
-
-        # 恢复按钮并输出 ZIP
         final_html = f"<progress value='{total}' max='{total}' style='width:100%'></progress>"
         yield gr.update(value=zip_path, visible=True), gr.update(value="Batch Generate TTS", interactive=True), gr.update(value=final_html)
 
@@ -633,19 +647,20 @@ with gr.Blocks(
         """
         if not original_text or not original_text.strip():
             raise gr.Error("No text to synthesize.")
-
         voice_name = voice_name_md.replace("# Voice: ", "").strip().lower()
         if not voice_name:
             raise gr.Error("Please select a voice.")
 
         total = len(LANGUAGES)
         zip_path = os.path.join(temp_dir, f"{voice_name}_alllangs_{int(time.time())}.zip")
-        # 让按钮显示处理中
         yield gr.update(visible=False), gr.update(value="Processing...", interactive=False), gr.update(value="")
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for idx, lang in enumerate(LANGUAGES, start=1):
-                progress(idx / total, desc=f"{lang}: translating")
-                # 翻译文本
+
+        semaphore = asyncio.Semaphore(BATCH_PARALLELISM)  # 并发数自己调，通常 5-10 足够
+        mp3_paths = [os.path.join(temp_dir, f"{voice_name}_{lang.replace(' ', '_')}.mp3") for lang in LANGUAGES]
+
+        async def translate_and_synth(idx, lang):
+            async with semaphore:
+                # 翻译
                 try:
                     if lang == "English":
                         translated = original_text
@@ -653,27 +668,38 @@ with gr.Blocks(
                         translated = await translate_text(original_text, lang)
                 except Exception as e:
                     translated = f"[Translation Error: {str(e)}]"
-                # 生成音频
-                mp3_path = os.path.join(temp_dir, f"{voice_name}_{lang.replace(' ', '_')}.mp3")
+                # 合成
                 try:
-                    await generate_audio_file(translated, mp3_path, voice_name, vibe_instruction)
-                    zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
+                    await generate_audio_file(translated, mp3_paths[idx], voice_name, vibe_instruction)
                 except Exception as e:
-                    # 出错时生成一个提示音频或文本（可选，这里直接跳过）
+                    # 你可以写个特殊音频，或者啥都不做
                     pass
-                progress_html = (
-                    f"<progress value='{idx}' max='{total}' style='width:100%'></progress> "
-                    f"<div>正在处理: {lang}</div>"
-                )
-                yield gr.update(visible=False), gr.update(), gr.update(value=progress_html)
+                return idx, lang
 
+        # 创建全部并发任务
+        tasks = [asyncio.create_task(translate_and_synth(idx, lang)) for idx, lang in enumerate(LANGUAGES)]
+
+        finished = 0
+        for coro in asyncio.as_completed(tasks):
+            idx, lang = await coro
+            finished += 1
+            progress(finished / total, desc=f"{lang}: finished")
+            progress_html = (
+                f"<progress value='{finished}' max='{total}' style='width:100%'></progress> "
+                f"<div>正在处理: {lang}</div>"
+            )
+            yield gr.update(visible=False), gr.update(), gr.update(value=progress_html)
+
+        # 打包 ZIP
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for mp3_path in mp3_paths:
+                zipf.write(mp3_path, arcname=os.path.basename(mp3_path))
         gr.Info(f"已生成 {total} 个音频，打包完成。")
         final_html = (
             f"<progress value='{total}' max='{total}' style='width:100%'></progress> "
             f"<div>所有语言批量生成完成！</div>"
         )
         yield gr.update(value=zip_path, visible=True), gr.update(value="Generate All Languages Audio (Original)", interactive=True), gr.update(value=final_html)
-
 
     # 三步输出： [download_zip, batch_btn, progress_bar]
     batch_btn.click(
